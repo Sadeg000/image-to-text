@@ -41,6 +41,7 @@ button:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px sol
 .bar.on{display:block}
 .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
 #status{color:var(--mute);min-height:1.5em;margin:8px 0}
+textarea.mono{font-family:ui-monospace,Consolas,monospace;white-space:pre;overflow:auto}
 textarea{width:100%;min-height:200px;font:inherit;line-height:1.5;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;resize:vertical}
 .tbl{display:none;overflow-x:auto;max-width:100%;margin-bottom:14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 .tbl.on{display:block}
@@ -70,6 +71,7 @@ footer{margin-top:28px;color:var(--mute);font-size:.9rem}
   <div class="row">
     <div class="seg" role="radiogroup" aria-label="Mode">
       <label><input type="radio" name="mode" value="text" checked>Text</label>
+      <label><input type="radio" name="mode" value="layout">Keep layout</label>
       <label><input type="radio" name="mode" value="table">Table → Excel</label>
     </div>
     <label class="lang">Language
@@ -129,12 +131,12 @@ footer{margin-top:28px;color:var(--mute);font-size:.9rem}
     for(var i=0;i<it.length;i++){if(it[i].type.indexOf('image')===0){setFile(it[i].getAsFile());break}}
   });
   document.querySelectorAll('input[name=mode]').forEach(function(r){r.addEventListener('change',function(){
-    $('hint').textContent=mode()==='table'?'Table mode rebuilds rows and columns. Copy the result and paste into Excel or Google Sheets.':'Text mode keeps paragraphs and line breaks. Use Table mode for spreadsheets, price lists and schedules.';
+    $('hint').textContent=mode()==='layout'?'Keep layout places each word where it is in the image, using spaces. Good for forms, receipts and lists.':mode()==='table'?'Table mode rebuilds rows and columns. Copy the result and paste into Excel or Google Sheets.':'Text mode keeps paragraphs and line breaks. Use Table mode for spreadsheets, price lists and schedules.';
     saveB.textContent=mode()==='table'?'Download .csv':'Download .txt';
   })});
 
   // Upscale, grayscale, stretch contrast, fix dark backgrounds
-  function prep(file){return new Promise(function(res,rej){
+  function prep(file,clean){return new Promise(function(res,rej){
     var img=new Image();
     img.onload=function(){
       var w=img.naturalWidth,h=img.naturalHeight,L=Math.max(w,h),s=1;
@@ -150,6 +152,11 @@ footer{margin-top:28px;color:var(--mute);font-size:.9rem}
       if(hi-lo<30){lo=0;hi=255}
       var k=255/(hi-lo);
       for(i=0;i<p.length;i+=4){g=(p[i]-lo)*k;g=g<0?0:g>255?255:g;if(inv)g=255-g;p[i]=p[i+1]=p[i+2]=g;p[i+3]=255}
+      if(clean){ // remove long table border lines so they are not read as characters
+        var W=c.width,H=c.height,M=Math.max(50,Math.round(Math.min(W,H)*.025)),y,xx,s0,on,q,o,j;
+        for(y=0;y<H;y++){s0=-1;for(xx=0;xx<=W;xx++){on=xx<W&&p[(y*W+xx)*4]<160;if(on&&s0<0)s0=xx;if(!on&&s0>=0){if(xx-s0>=M)for(q=s0;q<xx;q++)for(o=-1;o<=1;o++)if(y+o>=0&&y+o<H){j=((y+o)*W+q)*4;p[j]=p[j+1]=p[j+2]=255}s0=-1}}}
+        for(xx=0;xx<W;xx++){s0=-1;for(y=0;y<=H;y++){on=y<H&&p[(y*W+xx)*4]<160;if(on&&s0<0)s0=y;if(!on&&s0>=0){if(y-s0>=M)for(q=s0;q<y;q++)for(o=-1;o<=1;o++)if(xx+o>=0&&xx+o<W){j=(q*W+xx+o)*4;p[j]=p[j+1]=p[j+2]=255}s0=-1}}}
+      }
       x.putImageData(d,0,0);URL.revokeObjectURL(img.src);res(c);
     };
     img.onerror=function(){rej(new Error('image'))};
@@ -159,30 +166,40 @@ footer{margin-top:28px;color:var(--mute);font-size:.9rem}
   function getWords(d){
     var ws=d.words;
     if(!ws||!ws.length){ws=[];(d.blocks||[]).forEach(function(b){(b.paragraphs||[]).forEach(function(p){(p.lines||[]).forEach(function(l){(l.words||[]).forEach(function(w){ws.push(w)})})})})}
-    return ws.filter(function(w){return w.text&&w.text.trim()&&w.confidence>20}).map(function(w){
+    return ws.filter(function(w){return w.text&&w.text.trim()&&w.confidence>0}).map(function(w){
       return{t:w.text.trim(),x0:w.bbox.x0,x1:w.bbox.x1,y0:w.bbox.y0,y1:w.bbox.y1}});
   }
 
-  // Rebuild rows and columns from word positions
-  function buildTable(ws){
-    if(!ws.length)return[];
-    var hs=ws.map(function(w){return w.y1-w.y0}).sort(function(a,b){return a-b}),mh=hs[hs.length>>1]||10;
+  function medH(ws){var h=ws.map(function(w){return w.y1-w.y0}).sort(function(a,b){return a-b});return h[h.length>>1]||10}
+  function rowsOf(ws,mh){
     ws.sort(function(a,b){return(a.y0+a.y1)-(b.y0+b.y1)});
     var rows=[],r=null;
     ws.forEach(function(w){var cy=(w.y0+w.y1)/2;
       if(r&&Math.abs(cy-r.cy)<mh*.6){r.w.push(w);r.cy=(r.cy*(r.w.length-1)+cy)/r.w.length}
       else{r={cy:cy,w:[w]};rows.push(r)}});
-    var gap=mh*1.4,cells=[];
-    rows.forEach(function(r,ri){r.w.sort(function(a,b){return a.x0-b.x0});var cur=null;
-      r.w.forEach(function(w){
-        if(cur&&w.x0-cur.x1<gap){cur.t+=' '+w.t;cur.x1=Math.max(cur.x1,w.x1)}
-        else{cur={t:w.t,x0:w.x0,x1:w.x1,r:ri};cells.push(cur)}})});
-    var iv=cells.map(function(c){return[c.x0,c.x1]}).sort(function(a,b){return a[0]-b[0]}),bands=[];
-    iv.forEach(function(v){var b=bands[bands.length-1];if(b&&v[0]<=b[1])b[1]=Math.max(b[1],v[1]);else bands.push([v[0],v[1]])});
+    rows.forEach(function(r){r.w.sort(function(a,b){return a.x0-b.x0})});
+    return rows;
+  }
+  function layoutText(ws){
+    if(!ws.length)return'';
+    var mh=medH(ws),rows=rowsOf(ws,mh),
+        cw=ws.map(function(w){return(w.x1-w.x0)/w.t.length}).sort(function(a,b){return a-b})[ws.length>>1]||mh/2,
+        minX=Math.min.apply(null,ws.map(function(w){return w.x0}));
+    return rows.map(function(r){var l='';
+      r.w.forEach(function(w){var t=Math.round((w.x0-minX)/cw);while(l.length<t)l+=' ';if(l&&!/\s$/.test(l))l+=' ';l+=w.t});
+      return l}).join('\n');
+  }
+  // Columns come from vertical white gaps shared by all rows
+  function buildTable(ws){
+    if(!ws.length)return[];
+    var mh=medH(ws),rows=rowsOf(ws,mh),tol=mh*.55,bands=[];
+    ws.map(function(w){return[w.x0,w.x1]}).sort(function(a,b){return a[0]-b[0]}).forEach(function(v){
+      var b=bands[bands.length-1];if(b&&v[0]<=b[1]+tol)b[1]=Math.max(b[1],v[1]);else bands.push([v[0],v[1]])});
     var g=rows.map(function(){return new Array(bands.length).fill('')});
-    cells.forEach(function(c){var m=(c.x0+c.x1)/2,ci=0;
-      bands.forEach(function(b,i){if(m>=b[0]&&m<=b[1])ci=i});
-      g[c.r][ci]=g[c.r][ci]?g[c.r][ci]+' '+c.t:c.t});
+    rows.forEach(function(r,ri){r.w.forEach(function(w){
+      var m=(w.x0+w.x1)/2,ci=0,best=1e12;
+      bands.forEach(function(b,i){var dd=m<b[0]?b[0]-m:m>b[1]?m-b[1]:0;if(dd<best){best=dd;ci=i}});
+      g[ri][ci]=g[ri][ci]?g[ri][ci]+' '+w.t:w.t})});
     return g;
   }
   function esc(s){return s.replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -196,19 +213,22 @@ footer{margin-top:28px;color:var(--mute);font-size:.9rem}
     if(!current)return;
     if(typeof Tesseract==='undefined'){st.textContent='The text engine could not load. Check your connection and reload the page.';return}
     var m=mode(),worker=null;
-    go.disabled=true;copyB.disabled=true;saveB.disabled=true;out.value='';tbl.classList.remove('on');grid=null;
+    go.disabled=true;copyB.disabled=true;saveB.disabled=true;out.value='';out.classList.toggle('mono',m==='layout'||m==='table');tbl.classList.remove('on');grid=null;
     bar.classList.add('on');fill.style.width='0';st.textContent='Preparing image…';
     try{
-      var canvas=await prep(current);
+      var canvas=await prep(current,m!=='text');
       worker=await Tesseract.createWorker($('lang').value,1,{logger:function(x){
         if(x.status==='recognizing text'){fill.style.width=Math.round(x.progress*100)+'%';st.textContent='Reading… '+Math.round(x.progress*100)+'%'}
         else if(x.status&&x.status.indexOf('loading')===0){st.textContent='Loading language data (first run only)…'}}});
-      await worker.setParameters({tessedit_pageseg_mode:m==='table'?'6':'3',preserve_interword_spaces:'1'});
+      await worker.setParameters({tessedit_pageseg_mode:m==='table'?'11':m==='layout'?'6':'3',preserve_interword_spaces:'1'});
       var res=await worker.recognize(canvas);
       if(m==='table'){
         grid=buildTable(getWords(res.data));
         if(grid.length){showGrid(grid);st.textContent='Done: '+grid.length+' rows, '+grid[0].length+' columns. Press Copy, then paste into Excel.'}
         else st.textContent='No table found. Try a sharper image.';
+      }else if(m==='layout'){
+        var lt=layoutText(getWords(res.data));out.value=lt;
+        st.textContent=lt?'Done. Positions are kept with spaces.':'No text found. Try a sharper image.';
       }else{
         var t=(res.data.text||'').trim();out.value=t;
         st.textContent=t?'Done. '+t.split(/\s+/).length+' words found.':'No text found. Try a sharper image or another language.';
